@@ -1,7 +1,7 @@
 from pathlib import Path
 
 VLLM_PORT = 1053
-
+SGLANG_PORT = 30000
 # The root directory of the project, relative to the current file location
 PROJECT_ROOT = "../../"
 

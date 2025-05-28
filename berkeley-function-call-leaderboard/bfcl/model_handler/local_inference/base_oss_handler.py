@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import requests
-from bfcl.constants.eval_config import RESULT_PATH, VLLM_PORT
+from bfcl.constants.eval_config import RESULT_PATH, SGLANG_PORT, VLLM_PORT
 from bfcl.model_handler.base_handler import BaseHandler
 from bfcl.model_handler.model_style import ModelStyle
 from bfcl.model_handler.utils import (
@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 
 class OSSHandler(BaseHandler, EnforceOverrides):
-    def __init__(self, model_name, temperature, dtype="bfloat16") -> None:
+    def __init__(self, model_name, temperature, backend, dtype="bfloat16") -> None:
         super().__init__(model_name, temperature)
         self.model_name_huggingface = model_name
         self.model_style = ModelStyle.OSSMODEL
@@ -34,8 +34,17 @@ class OSSHandler(BaseHandler, EnforceOverrides):
         # Read from env vars with fallbacks
         self.vllm_host = os.getenv("VLLM_ENDPOINT", "localhost")
         self.vllm_port = os.getenv("VLLM_PORT", VLLM_PORT)
-
-        self.base_url = f"http://{self.vllm_host}:{self.vllm_port}/v1"
+        self.sglang_host = os.getenv("SGLANG_ENDPOINT", "localhost")
+        self.sglang_port = os.getenv("SGLANG_PORT", SGLANG_PORT)
+        self.backend = backend
+        
+        if self.backend == "vllm":
+            self.base_url = f"http://{self.vllm_host}:{self.vllm_port}/v1"
+        elif self.backend == "sglang":
+            self.base_url = f"http://{self.sglang_host}:{self.sglang_port}/v1"
+        else:
+            raise ValueError(f"Backend {self.backend} is not supported.")
+        
         self.client = OpenAI(base_url=self.base_url, api_key="EMPTY")
 
     @override
@@ -141,24 +150,44 @@ class OSSHandler(BaseHandler, EnforceOverrides):
                     text=True,  # To get the output as text instead of bytes
                 )
             elif backend == "sglang":
-
+                sglang_cmd = [
+                    "python",
+                    "-m",
+                    "sglang.launch_server",
+                    "--model-path",
+                    str(self.model_path_or_id),
+                    "--port",
+                    str(self.sglang_port),
+                    "--dtype",
+                    str(self.dtype),
+                    "--tp",
+                    str(num_gpus),
+                    "--mem-fraction-static",
+                    str(gpu_memory_utilization),
+                    "--trust-remote-code",
+                ]
+                
+                # Get the directory of the current file for chat templates
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                
+                # Add model-specific SGLang parameters
+                if "DeepSeek-V3" in self.model_name:
+                    sglang_cmd.extend(["--tool-call-parser", "deepseekv3"])
+                    chat_template_path = os.path.join(current_dir, "chat_template", "tool_chat_template_deepseekv3.jinja")
+                    sglang_cmd.extend(["--chat-template", chat_template_path])
+                elif "Llama-4" in self.model_name:
+                    sglang_cmd.extend(["--tool-call-parser", "pythonic"])
+                    chat_template_path = os.path.join(current_dir, "chat_template", "tool_chat_template_llama4_pythonic.jinja")
+                    sglang_cmd.extend(["--chat-template", chat_template_path])
+                
+                # # Add optional SGLang parameters if they are set (for future use)
+                # if hasattr(self, 'tool_call_parser') and self.tool_call_parser:
+                #     sglang_cmd.extend(["--tool-call-parser", str(self.tool_call_parser)])
+                # if hasattr(self, 'chat_template') and self.chat_template:
+                #     sglang_cmd.extend(["--chat-template", str(self.chat_template)])
+                
                 process = subprocess.Popen(
-                    [
-                        "python",
-                        "-m",
-                        "sglang.launch_server",
-                        "--model-path",
-                        str(self.model_path_or_id),
-                        "--port",
-                        str(self.vllm_port),
-                        "--dtype",
-                        str(self.dtype),
-                        "--tp",
-                        str(num_gpus),
-                        "--mem-fraction-static",
-                        str(gpu_memory_utilization),
-                        "--trust-remote-code",
-                    ],
+                    sglang_cmd,
                     stdout=subprocess.PIPE,  # Capture stdout
                     stderr=subprocess.PIPE,  # Capture stderr
                     text=True,  # To get the output as text instead of bytes

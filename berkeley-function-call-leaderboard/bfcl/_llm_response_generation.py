@@ -3,6 +3,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import re
 
 from bfcl.constants.category_mapping import (
     MULTI_TURN_FUNC_DOC_FILE_MAPPING,
@@ -196,16 +197,33 @@ def multi_threaded_inference(handler, test_case, include_input_log, exclude_stat
                 # For example, timeout error or FC model returning invalid JSON response.
                 # Since temperature is already set to 0.001, retrying the same test case will not help.
                 # So we continue the generation process and record the error message as the model response
+                
+                # Extract concise error message
+                error_str = str(e)
+                if "524: A timeout occurred" in error_str:
+                    # Extract the host name from the error
+                    host_match = re.search(r'<title>(.*?)\s*\|\s*524: A timeout occurred</title>', error_str)
+                    if host_match:
+                        concise_error = f"{host_match.group(1)} | 524: A timeout occurred"
+                    else:
+                        concise_error = "524: A timeout occurred"
+                else:
+                    # For other errors, try to keep it concise
+                    if len(error_str) > 200:
+                        concise_error = error_str[:200] + "..."
+                    else:
+                        concise_error = error_str
+                
                 print("-" * 100)
                 print(
                     "❗️❗️ Error occurred during inference. Maximum reties reached for rate limit or other error. Continuing to next test case."
                 )
-                print(f"❗️❗️ Test case ID: {test_case['id']}, Error: {str(e)}")
+                print(f"❗️❗️ Test case ID: {test_case['id']}, Error: {concise_error}")
                 print("-" * 100)
 
                 return {
                     "id": test_case["id"],
-                    "result": f"Error during inference: {str(e)}",
+                    "result": f"Error during inference: {concise_error}",
                 }
 
     result_to_write = {
@@ -220,8 +238,9 @@ def multi_threaded_inference(handler, test_case, include_input_log, exclude_stat
 
 def generate_results(args, model_name, test_cases_total):
     update_mode = args.allow_overwrite
-    handler = build_handler(model_name, args.temperature)
+    handler = build_handler(model_name, args.temperature, args.backend)
 
+    # 走批量推理流程（需要启动本地服务器）
     if handler.model_style == ModelStyle.OSSMODEL:
         # batch_inference will handle the writing of results
         handler.batch_inference(
@@ -238,6 +257,7 @@ def generate_results(args, model_name, test_cases_total):
         )
 
     else:
+         # 走 API 调用流程
         futures = []
         with ThreadPoolExecutor(max_workers=args.num_threads) as executor:
             with tqdm(
